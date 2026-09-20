@@ -256,19 +256,7 @@ What is NOT working yet:**
 
 ---
 
-### ✅ Phase 14 — Deploy the Application
 
-**What we build:**
-- Deploy the React frontend to **Vercel** (free)
-- Deploy the Express backend to **Render** (free)
-- Connect to a live MongoDB database using **MongoDB Atlas** (free tier)
-- Add environment variables on each platform
-
-**What you can do after this phase:**
-- Share a real URL with anyone in the world
-- Your app is live on the internet 🌍
-
----
 
 ## 📁 Project Folder Structure (Final)
 
@@ -305,18 +293,11 @@ job-tracker/
 
 ---
 
-## 🧑‍💻 Who This Is For
 
-This project is built by a learner who knows HTML, CSS, JavaScript, React, Node.js, Express, and MongoDB — and wants to build something real using AI, while understanding every line of code that gets written.
-
-Each feature is built small, explained clearly, and tested before moving on.
-
----
 
 ## 🚀 Current Status
 
 > **Phase: Phase 13 Completed (Job URL Extraction & Web Scraping 🌐).**
-> Ready for Phase 14 — Deployment (Vercel, Render & MongoDB Atlas).
 
 ```
 [x] Phase 1  — React UI
