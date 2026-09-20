@@ -3,49 +3,80 @@ import { GoogleGenAI } from '@google/genai'
 const ANALYSIS_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    matchScore: { type: 'INTEGER', description: 'Match score between 0 and 100' },
+    matchScore: {
+      type: 'INTEGER',
+      description:
+        'Calculated match score from 0 to 100 based on weighted requirements (must-haves carry 75% weight, nice-to-haves carry 25% weight)',
+    },
     recommendation: {
       type: 'STRING',
       enum: ['APPLY', 'CONSIDER', 'SKIP'],
-      description: 'Recommendation for the applicant',
+      description:
+        'Recommendation: APPLY (>=70% with core must-haves met), CONSIDER (40-69%), or SKIP (<40% or dealbreakers missing)',
     },
     matchedSkills: {
       type: 'ARRAY',
-      items: { type: 'STRING' },
-      description: 'Skills present in both resume and job description',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          skill: { type: 'STRING', description: 'Name of the matched skill' },
+          evidence: {
+            type: 'STRING',
+            description: 'Verbatim quote or project proof from resume showing this skill in practical use',
+          },
+        },
+        required: ['skill', 'evidence'],
+      },
+      description: 'Skills present in both resume and job description, with verified evidence from the resume',
     },
     missingSkills: {
       type: 'ARRAY',
       items: { type: 'STRING' },
-      description: 'Required skills missing from the resume',
+      description: 'Required or preferred skills missing or unverified from the resume',
     },
     mustHave: {
       type: 'ARRAY',
       items: {
         type: 'OBJECT',
         properties: {
-          skill: { type: 'STRING' },
-          found: { type: 'BOOLEAN' },
+          skill: { type: 'STRING', description: 'Core mandatory requirement from the job posting' },
+          found: { type: 'BOOLEAN', description: 'Whether the candidate satisfies this mandatory requirement' },
+          evidence: {
+            type: 'STRING',
+            description:
+              'Direct quote/proof from resume if found, or concise explanation of why it is missing or unverified',
+          },
         },
-        required: ['skill', 'found'],
+        required: ['skill', 'found', 'evidence'],
       },
+      description: 'Mandatory non-negotiable requirements extracted from the job description',
     },
     niceToHave: {
       type: 'ARRAY',
       items: {
         type: 'OBJECT',
         properties: {
-          skill: { type: 'STRING' },
-          found: { type: 'BOOLEAN' },
+          skill: { type: 'STRING', description: 'Bonus or preferred qualification from the job posting' },
+          found: { type: 'BOOLEAN', description: 'Whether the candidate satisfies this bonus qualification' },
+          evidence: {
+            type: 'STRING',
+            description:
+              'Direct quote/proof from resume if found, or concise explanation of why it is missing or unverified',
+          },
         },
-        required: ['skill', 'found'],
+        required: ['skill', 'found', 'evidence'],
       },
+      description: 'Preferred bonus qualifications from the job description',
     },
-    explanation: { type: 'STRING', description: 'Brief rationale for the score' },
+    explanation: {
+      type: 'STRING',
+      description: 'Objective, evidence-based evaluation summary explaining the score and verdict',
+    },
     suggestions: {
       type: 'ARRAY',
       items: { type: 'STRING' },
-      description: 'Suggestions to better present existing experience',
+      description:
+        'Targeted improvement suggestions that cite specific points in the resume to better present existing experience without fabricating any skills',
     },
   },
   required: [
@@ -62,7 +93,7 @@ const ANALYSIS_SCHEMA = {
 
 /**
  * Normalizes and validates the AI response object, ensuring strict types,
- * bounded values, and deduplicated lists.
+ * bounded values, deduplicated lists, and evidence preservation.
  */
 export function normalizeAndValidateAnalysis(data) {
   if (!data || typeof data !== 'object') {
@@ -81,17 +112,42 @@ export function normalizeAndValidateAnalysis(data) {
     else recommendation = 'SKIP'
   }
 
-  // 3. Normalize skill lists (deduplicate, trim, filter non-strings)
+  // 3. Normalize matched skills (supports both { skill, evidence } objects and legacy string arrays)
+  const sanitizeMatchedSkills = (arr) => {
+    if (!Array.isArray(arr)) return []
+    const seen = new Set()
+    const result = []
+
+    for (const item of arr) {
+      if (typeof item === 'string') {
+        const skillName = item.trim()
+        if (skillName && !seen.has(skillName.toLowerCase())) {
+          seen.add(skillName.toLowerCase())
+          result.push({ skill: skillName, evidence: '' })
+        }
+      } else if (item && typeof item === 'object') {
+        const skillName = String(item.skill || '').trim()
+        const evidence = String(item.evidence || '').trim()
+        if (skillName && !seen.has(skillName.toLowerCase())) {
+          seen.add(skillName.toLowerCase())
+          result.push({ skill: skillName, evidence })
+        }
+      }
+    }
+    return result
+  }
+
+  // 4. Normalize string arrays (missingSkills, suggestions)
   const sanitizeStringArray = (arr) => {
     if (!Array.isArray(arr)) return []
     return Array.from(new Set(arr.map((s) => String(s).trim()).filter(Boolean)))
   }
 
-  const matchedSkills = sanitizeStringArray(data.matchedSkills)
+  const matchedSkills = sanitizeMatchedSkills(data.matchedSkills)
   const missingSkills = sanitizeStringArray(data.missingSkills)
   const suggestions = sanitizeStringArray(data.suggestions)
 
-  // 4. Normalize requirement tables
+  // 5. Normalize requirement tables with evidence
   const sanitizeRequirements = (arr) => {
     if (!Array.isArray(arr)) return []
     return arr
@@ -99,6 +155,7 @@ export function normalizeAndValidateAnalysis(data) {
       .map((item) => ({
         skill: String(item.skill || '').trim(),
         found: Boolean(item.found),
+        evidence: String(item.evidence || '').trim(),
       }))
       .filter((item) => item.skill.length > 0)
   }
@@ -106,7 +163,7 @@ export function normalizeAndValidateAnalysis(data) {
   const mustHave = sanitizeRequirements(data.mustHave)
   const niceToHave = sanitizeRequirements(data.niceToHave)
 
-  // 5. Explanation
+  // 6. Explanation
   const explanation =
     typeof data.explanation === 'string' && data.explanation.trim()
       ? data.explanation.trim()
@@ -134,15 +191,31 @@ export async function analyzeResumeWithAI(resume, jobDescription) {
   const ai = new GoogleGenAI({ apiKey })
 
   const prompt = `
-You are a professional resume analyst. Your job is to evaluate how well a candidate's resume matches a job description.
+You are a meticulous, objective technical recruiter and career coach evaluating a candidate's resume against a job description.
 
-Analyze the resume against the job description carefully. Then return your analysis as a valid JSON object matching the requested schema.
+EVALUATION METHODOLOGY:
+1. Requirement Classification:
+   - Carefully extract and separate MUST-HAVE requirements (non-negotiable prerequisites, years of core experience, mandatory technologies/degrees) from NICE-TO-HAVE requirements (bonus skills, preferred tools, nice-to-haves).
 
-STRICT RULES:
-- Never suggest adding a skill the candidate does not actually have
-- Only suggest better presentation of skills they already possess
-- Base every match or mismatch on actual evidence from the resume
-- Be honest — if a required skill is missing, say so clearly
+2. Evidence-Based Verification:
+   - For every requirement or skill marked as found (true), you MUST cite direct quote evidence or concrete project proof from the candidate's resume.
+   - If a technology is merely listed in a skills keyword section but shows no practical implementation in work experience or projects, note this nuance in the evidence/gap explanation.
+   - For any requirement marked as missing (false), provide a clear, concise reason explaining the gap.
+
+3. Weighted Scoring Logic:
+   - Calculate matchScore strictly and proportionally:
+     * MUST-HAVE requirements carry 75% of the total score weight.
+     * NICE-TO-HAVE requirements carry 25% of the total score weight.
+   - If critical dealbreakers are missing, do not inflate the score.
+   - Recommendation thresholds:
+     * "APPLY": matchScore >= 70 AND candidate satisfies the vast majority of must-haves.
+     * "CONSIDER": matchScore 40 to 69, or candidate has strong foundational skills with 1-2 addressable gaps.
+     * "SKIP": matchScore < 40, or candidate lacks the primary core mandatory requirements.
+
+4. Ethical & Tailored Improvement Suggestions:
+   - STRICT RULE: NEVER suggest adding or fabricating a skill, tool, or credential the candidate does not have.
+   - Provide highly specific, actionable advice on how to better frame, reorganize, or quantify the experience they ALREADY have on their resume to better align with the job posting keywords and metrics.
+   - Reference specific sections or bullet points from their resume.
 
 RESUME:
 ${resume}
@@ -155,7 +228,8 @@ ${jobDescription}
     process.env.GEMINI_MODEL,
     'gemini-3.5-flash-lite',
     'gemini-3.5-flash',
-    'gemini-3.6-flash',
+    'gemini-2.5-flash',
+    'gemini-1.5-flash',
   ].filter(Boolean)
 
   let response = null
